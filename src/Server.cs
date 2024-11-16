@@ -16,6 +16,13 @@ using var writer = new StreamWriter(stream) { NewLine = "\r\n" };
 while (await reader.ReadLineAsync().ConfigureAwait(false) is string command)
 {
     Console.WriteLine($"Rcv: {command}");
-    await writer.WriteLineAsync("+PONG");
-    await writer.FlushAsync().ConfigureAwait(false);
+    if(command.Equals("PING", StringComparison.OrdinalIgnoreCase))
+    {
+        var response = "+PONG";
+
+        Console.WriteLine($"Snd: {response}");
+
+        await writer.WriteLineAsync(response);
+        await writer.FlushAsync().ConfigureAwait(false);
+    }
 }
