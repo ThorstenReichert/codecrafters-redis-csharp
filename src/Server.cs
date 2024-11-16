@@ -7,22 +7,44 @@ Console.WriteLine("Logs from your program will appear here!");
 // Uncomment this block to pass the first stage
 using TcpListener server = new(IPAddress.Any, 6379);
 server.Start();
-var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false); // wait for client
 
-using var stream = handler.GetStream();
-using var reader = new StreamReader(stream);
-using var writer = new StreamWriter(stream) { NewLine = "\r\n" };
+var clientCounter = 0;
 
-while (await reader.ReadLineAsync().ConfigureAwait(false) is string command)
+while (true)
 {
-    Console.WriteLine($"Rcv: {command}");
-    if(command.Equals("PING", StringComparison.OrdinalIgnoreCase))
+    var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
+
+    _ = ServeTcpClientAsync(handler, clientCounter++);
+}
+
+static async Task ServeTcpClientAsync(TcpClient handler, int id)
+{
+    void LogIncoming(string message) => Console.WriteLine($"{id,-3} >> {message}");
+    void LogOutgoing(string message) => Console.WriteLine($"{id,-3} << {message}");
+    void LogError(Exception error) => Console.WriteLine($"{id} !! {error}");
+
+    try
     {
-        var response = "+PONG";
+        using var stream = handler.GetStream();
+        using var reader = new StreamReader(stream);
+        using var writer = new StreamWriter(stream) { NewLine = "\r\n" };
 
-        Console.WriteLine($"Snd: {response}");
+        while (await reader.ReadLineAsync().ConfigureAwait(false) is string command)
+        {
+            LogIncoming(command);
+            if (command.Equals("PING", StringComparison.OrdinalIgnoreCase))
+            {
+                var response = "+PONG";
 
-        await writer.WriteLineAsync(response);
-        await writer.FlushAsync().ConfigureAwait(false);
+                LogOutgoing(response);
+
+                await writer.WriteLineAsync(response);
+                await writer.FlushAsync().ConfigureAwait(false);
+            }
+        }
+    }
+    catch (Exception e) when (e is not OperationCanceledException)
+    {
+        LogError(e);
     }
 }
