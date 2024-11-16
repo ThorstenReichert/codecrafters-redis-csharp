@@ -7,4 +7,14 @@ Console.WriteLine("Logs from your program will appear here!");
 // Uncomment this block to pass the first stage
 using TcpListener server = new(IPAddress.Any, 6379);
 server.Start();
-server.AcceptSocket(); // wait for client
+var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false); // wait for client
+
+using var stream = handler.GetStream();
+using var reader = new StreamReader(stream);
+using var writer = new StreamWriter(stream) { NewLine = "\r\n" };
+
+while (await reader.ReadLineAsync().ConfigureAwait(false) is string command)
+{
+    Console.WriteLine($"Rcv: {command}");
+    await writer.WriteLineAsync("+PONG");
+}
