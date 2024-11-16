@@ -17,4 +17,5 @@ while (await reader.ReadLineAsync().ConfigureAwait(false) is string command)
 {
     Console.WriteLine($"Rcv: {command}");
     await writer.WriteLineAsync("+PONG");
+    await writer.FlushAsync().ConfigureAwait(false);
 }
