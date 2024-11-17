@@ -102,7 +102,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                         && getCmd.Value.AsSpan().SequenceEqual(CmdGet))
                     {
                         if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse)
-                            && foundResponse.Expiration < DateTime.UtcNow)
+                            && DateTime.UtcNow < foundResponse.Expiration)
                         {
                             LogOutgoing(foundResponse.Value);
 
