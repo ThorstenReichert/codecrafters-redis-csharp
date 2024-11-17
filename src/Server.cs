@@ -24,7 +24,7 @@ while (true)
     _ = new RedisClientHandler(handler.GetStream(), keyValueStore, clientCounter++).RunAsync();
 }
 
-internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDictionary<string, RespObject> keyValueStore, int id)
+public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDictionary<string, RespObject> keyValueStore, int id)
 {
     private static readonly byte[] CmdPing = Encoding.ASCII.GetBytes("PING");
     private static readonly byte[] CmdEcho = Encoding.ASCII.GetBytes("ECHO");
@@ -120,7 +120,7 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
     {
         while (true)
         {
-            var result = await reader.ReadAtLeastAsync(2).ConfigureAwait(false);
+            var result = await reader.ReadAsync().ConfigureAwait(false);
             var buffer = result.Buffer;
 
             LogIncoming($"Read [Buffer = {buffer.ToDebugString()}]");
@@ -250,7 +250,7 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
             var bulkString = new byte[length];
             bulkStringSlice.CopyTo(bulkString);
 
-            reader.AdvanceTo(buffer.GetPosition(1, bulkStringSlice.End));
+            reader.AdvanceTo(bulkStringSlice.End);
 
             respBulkString = new() { Value = bulkString };
             break;
@@ -258,7 +258,7 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
 
         while (true)
         {
-            var result = await reader.ReadAtLeastAsync(2).ConfigureAwait(false);
+            var result = await reader.ReadAsync().ConfigureAwait(false);
             var buffer = result.Buffer;
 
             var lineEnd = buffer.PositionOf((byte) '\n');
@@ -275,14 +275,14 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
     }
 }
 
-internal abstract class RespObject
+public abstract class RespObject
 {
     public abstract override string ToString();
 
     public abstract ValueTask WriteToAsync(Stream target);
 }
 
-internal sealed class RespArray : RespObject
+public sealed class RespArray : RespObject
 {
     public required ImmutableArray<RespObject> Items { get; init; }
 
@@ -303,7 +303,7 @@ internal sealed class RespArray : RespObject
     }
 }
 
-internal sealed class RespBulkString : RespObject
+public sealed class RespBulkString : RespObject
 {
     private static readonly byte[] EndOfPart = Encoding.ASCII.GetBytes("\r\n");
 
@@ -329,7 +329,7 @@ internal sealed class RespBulkString : RespObject
     }
 }
 
-internal sealed class RespNullBulkString : RespObject
+public sealed class RespNullBulkString : RespObject
 {
     private static readonly byte[] Payload = Encoding.ASCII.GetBytes("$-1\r\n");
 
@@ -350,7 +350,7 @@ internal sealed class RespNullBulkString : RespObject
     }
 }
 
-internal sealed class RespSimpleString : RespObject
+public sealed class RespSimpleString : RespObject
 {
     public required string Value { get; init; }
 
@@ -367,7 +367,7 @@ internal sealed class RespSimpleString : RespObject
     }
 }
 
-internal sealed class RespNull : RespObject
+public sealed class RespNull : RespObject
 {
     private static readonly byte[] Payload = Encoding.ASCII.GetBytes("_\r\n");
 
