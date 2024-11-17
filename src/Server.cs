@@ -1,7 +1,6 @@
 using codecrafters_redis.src;
 using System.Buffers;
 using System.Collections.Immutable;
-using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
@@ -20,10 +19,10 @@ while (true)
 {
     var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
 
-    _ = new RedisClientHandler(handler, clientCounter++).RunAsync();
+    _ = new RedisClientHandler(handler.GetStream(), clientCounter++).RunAsync();
 }
 
-internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
+public sealed class RedisClientHandler(Stream redisClientStream, int id)
 {
     private static readonly byte[] CmdPing = Encoding.ASCII.GetBytes("PING");
     private static readonly byte[] CmdEcho = Encoding.ASCII.GetBytes("ECHO");
@@ -38,8 +37,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
     {
         try
         {
-            using var stream = tcpClient.GetStream();
-
+            await using var stream = redisClientStream;
             var reader = PipeReader.Create(stream);
 
             while (true)
@@ -89,19 +87,22 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
 
             LogIncoming($"Read [Buffer = {buffer.ToDebugString()}]");
 
-            var lineEnd = buffer.PositionOf((byte) '\n');
+            var lineEnd = buffer.PositionOf((byte) '\r');
             if (!lineEnd.HasValue)
             {
                 reader.AdvanceTo(buffer.Start, buffer.End);
                 continue;
             }
 
+            var lineBuffer = buffer.Slice(0, lineEnd.Value);
+            var consumed = buffer.GetPosition(2, lineEnd.Value);
+
             var token = ParseTypeToken(ref buffer);
 
             if (token == '+')
             {
                 LogIncoming("Next simple string");
-                reader.AdvanceTo(lineEnd.Value);
+                reader.AdvanceTo(consumed);
 
                 var simpleStringBuffer = buffer.ToArray();
                 var simpleStringValue = Encoding.UTF8.GetString(simpleStringBuffer.AsSpan(1, simpleStringBuffer.Length - 2));
@@ -112,8 +113,9 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             {
                 LogIncoming("Next bulk string");
 
-                var length = ParseBulkStringLength(ref buffer);
-                reader.AdvanceTo(lineEnd.Value);
+                var lengthSlice = lineBuffer.Slice(1);
+                var length = ParseInteger(ref lengthSlice);
+                reader.AdvanceTo(consumed);
 
                 return await NextRespBulkStringAsync(reader, length);
             }
@@ -121,21 +123,22 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             {
                 LogIncoming("Next array");
 
-                var length = ParseArrayLength(buffer);
-                var builder = ImmutableArray.CreateBuilder<RespObject>(length);
+                var lengthSlice = lineBuffer.Slice(1);
+                var length = ParseInteger(ref lengthSlice);
+                var builder = new RespObject[length];
 
-                reader.AdvanceTo(lineEnd.Value);
+                reader.AdvanceTo(consumed);
 
                 for (var i = 0; i < length; i++)
                 {
                     builder[i] = await NextRespObjectAsync(reader);
                 }
 
-                return new RespArray { Items = builder.ToImmutable() };
+                return new RespArray { Items = builder.ToImmutableArray() };
             }
             else
             {
-                reader.AdvanceTo(lineEnd.Value);
+                reader.AdvanceTo(consumed);
                 throw new NotImplementedException($"Unrecognized object [Bytes = {buffer.ToDebugString()}]");
             }
         }
@@ -155,39 +158,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
         }
     }
 
-    int ParseBulkStringLength(ref readonly ReadOnlySequence<byte> buffer)
-    {
-        Debug.Assert(buffer.Length > 0, "BulkString length part must not be empty");
-        Debug.Assert(buffer.FirstSpan[0] == '$', "BulkString length part must start with '$'");
-
-        var reader = new SequenceReader<byte>(buffer);
-        reader.Advance(1);
-
-        if (!reader.TryReadTo(out ReadOnlySequence<byte> payload, (byte) '\r', false))
-        {
-            throw new InvalidOperationException("BulkString preamble is missing line-end");
-        }
-
-        return ParseInteger(payload);
-    }
-
-    int ParseArrayLength(ReadOnlySequence<byte> buffer)
-    {
-        Debug.Assert(buffer.Length > 0, "BulkString length part must not be empty");
-        Debug.Assert(buffer.FirstSpan[0] == '*', "BulkString length part must start with '*'");
-
-        var reader = new SequenceReader<byte>(buffer);
-        reader.Advance(1);
-
-        if (!reader.TryReadTo(out ReadOnlySequence<byte> payload, (byte) '\r', false))
-        {
-            throw new InvalidOperationException("BulkString preamble is missing line-end");
-        }
-
-        return ParseInteger(payload);
-    }
-
-    int ParseInteger(ReadOnlySequence<byte> buffer)
+    int ParseInteger(ref readonly ReadOnlySequence<byte> buffer)
     {
         // Maximum number of digits of the string encoding the bulk string length.
         const int MaxLength = 10;
@@ -240,7 +211,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             var bulkString = new byte[length];
             bulkStringSlice.CopyTo(bulkString);
 
-            reader.AdvanceTo(bulkStringSlice.End);
+            reader.AdvanceTo(buffer.GetPosition(1, bulkStringSlice.End));
 
             respBulkString = new() { Value = bulkString };
             break;
@@ -257,7 +228,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
                 continue;
             }
 
-            reader.AdvanceTo(lineEnd.Value);
+            reader.AdvanceTo(buffer.GetPosition(1, lineEnd.Value));
 
             return respBulkString;
         }
