@@ -1,10 +1,10 @@
+using codecrafters_redis.src;
 using System.Buffers;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection.Metadata.Ecma335;
 using System.Text;
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -87,9 +87,12 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             var result = await reader.ReadAsync().ConfigureAwait(false);
             var buffer = result.Buffer;
 
+            LogIncoming($"Read [Buffer = {buffer.ToDebugString()}]");
+
             var lineEnd = buffer.PositionOf((byte) '\n');
             if (!lineEnd.HasValue)
             {
+                reader.AdvanceTo(buffer.Start, buffer.End);
                 continue;
             }
 
@@ -133,9 +136,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             else
             {
                 reader.AdvanceTo(lineEnd.Value);
-
-                var objectText = Encoding.ASCII.GetString(buffer.ToArray()).Replace("\r\n", "\\r\\n");
-                throw new NotImplementedException($"Unrecognized object [Bytes = {objectText}]");
+                throw new NotImplementedException($"Unrecognized object [Bytes = {buffer.ToDebugString()}]");
             }
         }
     }
