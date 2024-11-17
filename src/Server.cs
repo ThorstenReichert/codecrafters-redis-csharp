@@ -237,11 +237,12 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
         RespBulkString respBulkString;
         while (true)
         {
-            var result = await reader.ReadAsync().ConfigureAwait(false);
+            var result = await reader.ReadAtLeastAsync(2).ConfigureAwait(false);
             var buffer = result.Buffer;
 
             if (buffer.Length < length)
             {
+                reader.AdvanceTo(buffer.Start, buffer.End);
                 continue;
             }
 
@@ -257,12 +258,13 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
 
         while (true)
         {
-            var result = await reader.ReadAsync().ConfigureAwait(false);
+            var result = await reader.ReadAtLeastAsync(2).ConfigureAwait(false);
             var buffer = result.Buffer;
 
             var lineEnd = buffer.PositionOf((byte) '\n');
             if (!lineEnd.HasValue)
             {
+                reader.AdvanceTo(buffer.Start, buffer.End);
                 continue;
             }
 
