@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection.Metadata.Ecma335;
 using System.Text;
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -153,7 +154,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
         }
     }
 
-    static int ParseBulkStringLength(ref readonly ReadOnlySequence<byte> buffer)
+    int ParseBulkStringLength(ref readonly ReadOnlySequence<byte> buffer)
     {
         Debug.Assert(buffer.Length > 0, "BulkString length part must not be empty");
         Debug.Assert(buffer.FirstSpan[0] == '$', "BulkString length part must start with '$'");
@@ -169,7 +170,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
         return ParseInteger(payload);
     }
 
-    static int ParseArrayLength(ReadOnlySequence<byte> buffer)
+    int ParseArrayLength(ReadOnlySequence<byte> buffer)
     {
         Debug.Assert(buffer.Length > 0, "BulkString length part must not be empty");
         Debug.Assert(buffer.FirstSpan[0] == '*', "BulkString length part must start with '*'");
@@ -185,7 +186,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
         return ParseInteger(payload);
     }
 
-    static int ParseInteger(ReadOnlySequence<byte> buffer)
+    int ParseInteger(ReadOnlySequence<byte> buffer)
     {
         // Maximum number of digits of the string encoding the bulk string length.
         const int MaxLength = 10;
@@ -210,6 +211,8 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             result += factor * (digit - 48);
             factor *= 10;
         }
+
+        LogIncoming($"Next integer [Value = {result}]");
 
         return result;
     }
