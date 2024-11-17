@@ -36,6 +36,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
     private void LogIncoming(RespObject? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogIncoming(string? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogOutgoing(RespObject? message) => Console.WriteLine($"{id,3} << {message}");
+    private void LogOutgoing(string? message) => Console.WriteLine($"{id,3} << {message}");
     private void LogError(Exception? error) => Console.WriteLine($"{id,3} !! {error}");
     private void LogError(string? error) => Console.WriteLine($"{id,3} !! {error}");
 
@@ -83,6 +84,9 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                             && pxOption.Value.AsSpan().SequenceEqual(OptPx))
                         {
                             var expiration = DateTime.UtcNow + TimeSpan.FromMilliseconds(pxTimeout.Value);
+
+                            LogOutgoing($"Expires [UTC = {expiration:u}]");
+
                             keyValueStore[setName.AsText()] = (setValue, expiration);
                         }
                         else
@@ -101,13 +105,29 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                     else if (respArray.Items is [RespBulkString getCmd, RespBulkString getName]
                         && getCmd.Value.AsSpan().SequenceEqual(CmdGet))
                     {
-                        if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse)
-                            && DateTime.UtcNow < foundResponse.Expiration)
+                        if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse))
                         {
-                            LogOutgoing(foundResponse.Value);
+                            var referenceTimestamp = DateTime.UtcNow;
+                            if (referenceTimestamp < foundResponse.Expiration)
+                            {
+                                LogOutgoing($"Expired [UTC = {foundResponse.Expiration:u}, Now = {referenceTimestamp:u}]");
 
-                            await foundResponse.Value.WriteToAsync(stream).ConfigureAwait(false);
-                            await stream.FlushAsync().ConfigureAwait(false);
+                                var expiredResponse = RespNullBulkString.Instance;
+
+                                LogOutgoing(expiredResponse);
+
+                                await expiredResponse.WriteToAsync(stream).ConfigureAwait(false);
+                                await stream.FlushAsync().ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                LogOutgoing($"Not Expired [UTC = {foundResponse.Expiration}, Now = {referenceTimestamp:u}]");
+
+                                LogOutgoing(foundResponse.Value);
+
+                                await foundResponse.Value.WriteToAsync(stream).ConfigureAwait(false);
+                                await stream.FlushAsync().ConfigureAwait(false);
+                            }
                         }
                         else
                         {
