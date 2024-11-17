@@ -15,7 +15,7 @@ using TcpListener server = new(IPAddress.Any, 6379);
 server.Start();
 
 var clientCounter = 0;
-var keyValueStore = new ConcurrentDictionary<string, RespObject>();
+var keyValueStore = new ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)>();
 
 while (true)
 {
@@ -24,12 +24,14 @@ while (true)
     _ = new RedisClientHandler(handler.GetStream(), keyValueStore, clientCounter++).RunAsync();
 }
 
-public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDictionary<string, RespObject> keyValueStore, int id)
+public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)> keyValueStore, int id)
 {
     private static readonly byte[] CmdPing = Encoding.ASCII.GetBytes("PING");
     private static readonly byte[] CmdEcho = Encoding.ASCII.GetBytes("ECHO");
     private static readonly byte[] CmdSet = Encoding.ASCII.GetBytes("SET");
     private static readonly byte[] CmdGet = Encoding.ASCII.GetBytes("GET");
+
+    private static readonly byte[] OptPx = Encoding.ASCII.GetBytes("px");
 
     private void LogIncoming(RespObject? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogIncoming(string? message) => Console.WriteLine($"{id,3} >> {message}");
@@ -74,10 +76,19 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                         await stream.FlushAsync().ConfigureAwait(false);
                     }
 
-                    else if (respArray.Items is [RespBulkString setCmd, RespBulkString setName, RespObject setValue]
+                    else if (respArray.Items is [RespBulkString setCmd, RespBulkString setName, RespObject setValue, .. var setOptional]
                         && setCmd.Value.AsSpan().SequenceEqual(CmdSet))
                     {
-                        keyValueStore[setName.AsText()] = setValue;
+                        if (setOptional is [RespBulkString pxOption, RespInteger pxTimeout]
+                            && pxOption.Value.AsSpan().SequenceEqual(OptPx))
+                        {
+                            var expiration = DateTime.UtcNow + TimeSpan.FromMilliseconds(pxTimeout.Value);
+                            keyValueStore[setName.AsText()] = (setValue, expiration);
+                        }
+                        else
+                        {
+                            keyValueStore[setName.AsText()] = (setValue, DateTime.MaxValue);
+                        }
 
                         var response = new RespSimpleString { Value = "OK" };
 
@@ -90,11 +101,12 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                     else if (respArray.Items is [RespBulkString getCmd, RespBulkString getName]
                         && getCmd.Value.AsSpan().SequenceEqual(CmdGet))
                     {
-                        if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse))
+                        if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse)
+                            && foundResponse.Expiration < DateTime.UtcNow)
                         {
-                            LogOutgoing(foundResponse);
+                            LogOutgoing(foundResponse.Value);
 
-                            await foundResponse.WriteToAsync(stream).ConfigureAwait(false);
+                            await foundResponse.Value.WriteToAsync(stream).ConfigureAwait(false);
                             await stream.FlushAsync().ConfigureAwait(false);
                         }
                         else
@@ -143,9 +155,20 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                 reader.AdvanceTo(consumed);
 
                 var simpleStringBuffer = buffer.ToArray();
-                var simpleStringValue = Encoding.UTF8.GetString(simpleStringBuffer.AsSpan(1, simpleStringBuffer.Length - 2));
+                var simpleStringValue = Encoding.ASCII.GetString(simpleStringBuffer.AsSpan(1, simpleStringBuffer.Length - 2));
 
                 return new RespSimpleString { Value = simpleStringValue };
+            }
+            else if (token == ':')
+            {
+                LogIncoming("Next integer");
+                reader.AdvanceTo(consumed);
+
+                var integerBuffer = buffer.ToArray();
+                var integerText = Encoding.ASCII.GetString(integerBuffer.AsSpan(1, integerBuffer.Length - 2));
+                var integer = long.Parse(integerText);
+
+                return new RespInteger { Value = integer };
             }
             else if (token == '$')
             {
@@ -364,6 +387,21 @@ public sealed class RespSimpleString : RespObject
         var payload = Encoding.ASCII.GetBytes($"+{Value}\r\n");
 
         await target.WriteAsync(payload).ConfigureAwait(false);
+    }
+}
+
+public sealed class RespInteger : RespObject
+{
+    public required long Value { get; init; }
+
+    public override string ToString()
+    {
+        return Value.ToString();
+    }
+
+    public override async ValueTask WriteToAsync(Stream target)
+    {
+        await target.WriteAsync(Encoding.ASCII.GetBytes($":{Value}\r\n")).ConfigureAwait(false);
     }
 }
 
