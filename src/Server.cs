@@ -80,10 +80,11 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                     else if (respArray.Items is [RespBulkString setCmd, RespBulkString setName, RespObject setValue, .. var setOptional]
                         && setCmd.Value.AsSpan().SequenceEqual(CmdSet))
                     {
-                        if (setOptional is [RespBulkString pxOption, RespInteger pxTimeout]
+                        if (setOptional is [RespBulkString pxOption, RespBulkString pxTimeout]
                             && pxOption.Value.AsSpan().SequenceEqual(OptPx))
                         {
-                            var expiration = DateTime.UtcNow + TimeSpan.FromMilliseconds(pxTimeout.Value);
+                            var expirationDuration = int.Parse(pxTimeout.Value);
+                            var expiration = DateTime.UtcNow + TimeSpan.FromMilliseconds(expirationDuration);
 
                             LogOutgoing($"Expires [UTC = {expiration:u}]");
 
@@ -108,7 +109,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                         if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse))
                         {
                             var referenceTimestamp = DateTime.UtcNow;
-                            if (referenceTimestamp < foundResponse.Expiration)
+                            if (foundResponse.Expiration < referenceTimestamp)
                             {
                                 LogOutgoing($"Expired [UTC = {foundResponse.Expiration:u}, Now = {referenceTimestamp:u}]");
 

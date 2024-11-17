@@ -5,6 +5,8 @@ VisualStudioVersion = 17.11.35303.130
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "codecrafters-redis", "codecrafters-redis.csproj", "{D133C1BC-18C6-4906-A04C-7104C5285736}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "codecrafters-redis.tests", "..\codecrafters-redis.tests\codecrafters-redis.tests.csproj", "{2783C0FC-DB8B-4BD4-A58A-6B4E2630B333}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{D133C1BC-18C6-4906-A04C-7104C5285736}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D133C1BC-18C6-4906-A04C-7104C5285736}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D133C1BC-18C6-4906-A04C-7104C5285736}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2783C0FC-DB8B-4BD4-A58A-6B4E2630B333}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2783C0FC-DB8B-4BD4-A58A-6B4E2630B333}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2783C0FC-DB8B-4BD4-A58A-6B4E2630B333}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2783C0FC-DB8B-4BD4-A58A-6B4E2630B333}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
