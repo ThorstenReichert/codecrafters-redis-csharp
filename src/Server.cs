@@ -82,7 +82,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, int id)
     {
         while (true)
         {
-            var result = await reader.ReadAsync().ConfigureAwait(false);
+            var result = await reader.ReadAtLeastAsync(2).ConfigureAwait(false);
             var buffer = result.Buffer;
 
             LogIncoming($"Read [Buffer = {buffer.ToDebugString()}]");
