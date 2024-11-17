@@ -237,7 +237,7 @@ internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDic
         RespBulkString respBulkString;
         while (true)
         {
-            var result = await reader.ReadAtLeastAsync(2).ConfigureAwait(false);
+            var result = await reader.ReadAsync().ConfigureAwait(false);
             var buffer = result.Buffer;
 
             if (buffer.Length < length)
