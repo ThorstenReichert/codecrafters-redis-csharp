@@ -128,7 +128,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
                 reader.AdvanceTo(lineEnd.Value);
 
                 var objectText = Encoding.ASCII.GetString(buffer.ToArray()).Replace("\r\n", "\\r\\n");
-                LogError($"Unrecognized object [Bytes = {objectText}]");
+                throw new NotImplementedException($"Unrecognized object [Bytes = {objectText}]");
             }
         }
     }
