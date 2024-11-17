@@ -1,5 +1,6 @@
 using codecrafters_redis.src;
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.IO.Pipelines;
 using System.Net;
@@ -14,18 +15,21 @@ using TcpListener server = new(IPAddress.Any, 6379);
 server.Start();
 
 var clientCounter = 0;
+var keyValueStore = new ConcurrentDictionary<string, RespObject>();
 
 while (true)
 {
     var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
 
-    _ = new RedisClientHandler(handler.GetStream(), clientCounter++).RunAsync();
+    _ = new RedisClientHandler(handler.GetStream(), keyValueStore, clientCounter++).RunAsync();
 }
 
-public sealed class RedisClientHandler(Stream redisClientStream, int id)
+internal sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDictionary<string, RespObject> keyValueStore, int id)
 {
     private static readonly byte[] CmdPing = Encoding.ASCII.GetBytes("PING");
     private static readonly byte[] CmdEcho = Encoding.ASCII.GetBytes("ECHO");
+    private static readonly byte[] CmdSet = Encoding.ASCII.GetBytes("SET");
+    private static readonly byte[] CmdGet = Encoding.ASCII.GetBytes("GET");
 
     private void LogIncoming(RespObject? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogIncoming(string? message) => Console.WriteLine($"{id,3} >> {message}");
@@ -68,6 +72,40 @@ public sealed class RedisClientHandler(Stream redisClientStream, int id)
 
                         await response.WriteToAsync(stream).ConfigureAwait(false);
                         await stream.FlushAsync().ConfigureAwait(false);
+                    }
+
+                    else if (respArray.Items is [RespBulkString setCmd, RespBulkString setName, RespObject setValue]
+                        && setCmd.Value.AsSpan().SequenceEqual(CmdSet))
+                    {
+                        keyValueStore[setName.AsText()] = setValue;
+
+                        var response = new RespSimpleString { Value = "OK" };
+
+                        LogOutgoing(response);
+
+                        await response.WriteToAsync(stream).ConfigureAwait(false);
+                        await stream.FlushAsync().ConfigureAwait(false);
+                    }
+
+                    else if (respArray.Items is [RespBulkString getCmd, RespBulkString getName]
+                        && getCmd.Value.AsSpan().SequenceEqual(CmdGet))
+                    {
+                        if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse))
+                        {
+                            LogOutgoing(foundResponse);
+
+                            await foundResponse.WriteToAsync(stream).ConfigureAwait(false);
+                            await stream.FlushAsync().ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            var notFoundResponse = RespNullBulkString.Instance;
+
+                            LogOutgoing(notFoundResponse);
+
+                            await notFoundResponse.WriteToAsync(stream).ConfigureAwait(false);
+                            await stream.FlushAsync().ConfigureAwait(false);
+                        }
                     }
                 }
             }
@@ -233,94 +271,119 @@ public sealed class RedisClientHandler(Stream redisClientStream, int id)
             return respBulkString;
         }
     }
+}
 
-    internal abstract class RespObject
+internal abstract class RespObject
+{
+    public abstract override string ToString();
+
+    public abstract ValueTask WriteToAsync(Stream target);
+}
+
+internal sealed class RespArray : RespObject
+{
+    public required ImmutableArray<RespObject> Items { get; init; }
+
+    public override string ToString()
     {
-        public abstract override string ToString();
-
-        public abstract ValueTask WriteToAsync(Stream target);
+        return $"[{string.Join(", ", Items)}]";
     }
 
-    internal sealed class RespArray : RespObject
+    public override async ValueTask WriteToAsync(Stream target)
     {
-        public required ImmutableArray<RespObject> Items { get; init; }
+        var preamble = Encoding.ASCII.GetBytes($"*{Items.Length}\r\n");
 
-        public override string ToString()
+        await target.WriteAsync(preamble).ConfigureAwait(false);
+        foreach (var item in Items)
         {
-            return $"[{string.Join(", ", Items)}]";
-        }
-
-        public override async ValueTask WriteToAsync(Stream target)
-        {
-            var preamble = Encoding.ASCII.GetBytes($"*{Items.Length}\r\n");
-
-            await target.WriteAsync(preamble).ConfigureAwait(false);
-            foreach (var item in Items)
-            {
-                await item.WriteToAsync(target).ConfigureAwait(false);
-            }
+            await item.WriteToAsync(target).ConfigureAwait(false);
         }
     }
+}
 
-    internal sealed class RespBulkString : RespObject
+internal sealed class RespBulkString : RespObject
+{
+    private static readonly byte[] EndOfPart = Encoding.ASCII.GetBytes("\r\n");
+
+    public required byte[] Value { get; init; }
+
+    public string AsText()
     {
-        private static readonly byte[] EndOfPart = Encoding.ASCII.GetBytes("\r\n");
-
-        public required byte[] Value { get; init; }
-
-        public override string ToString()
-        {
-            return Encoding.ASCII.GetString(Value);
-        }
-
-        public override async ValueTask WriteToAsync(Stream target)
-        {
-            var preamble = Encoding.ASCII.GetBytes($"${Value.Length}\r\n");
-
-            await target.WriteAsync(preamble).ConfigureAwait(false);
-            await target.WriteAsync(Value).ConfigureAwait(false);
-            await target.WriteAsync(EndOfPart).ConfigureAwait(false);
-        }
+        return Encoding.ASCII.GetString(Value);
     }
 
-    internal sealed class RespSimpleString : RespObject
+    public override string ToString()
     {
-        public required string Value { get; init; }
-
-        public override string ToString()
-        {
-            return Value;
-        }
-
-        public override async ValueTask WriteToAsync(Stream target)
-        {
-            var payload = Encoding.ASCII.GetBytes($"+{Value}\r\n");
-
-            await target.WriteAsync(payload).ConfigureAwait(false);
-        }
+        return Encoding.ASCII.GetString(Value);
     }
 
-    internal sealed class RespNull : RespObject
+    public override async ValueTask WriteToAsync(Stream target)
     {
-        private static readonly byte[] Payload = Encoding.ASCII.GetBytes("_\r\n");
+        var preamble = Encoding.ASCII.GetBytes($"${Value.Length}\r\n");
 
-        private RespNull()
-        {
-        }
+        await target.WriteAsync(preamble).ConfigureAwait(false);
+        await target.WriteAsync(Value).ConfigureAwait(false);
+        await target.WriteAsync(EndOfPart).ConfigureAwait(false);
+    }
+}
 
-        public static RespNull Instance { get; } = new();
+internal sealed class RespNullBulkString : RespObject
+{
+    private static readonly byte[] Payload = Encoding.ASCII.GetBytes("$-1\r\n");
 
-        public override string ToString()
-        {
-            return "<null>";
-        }
-
-        public override async ValueTask WriteToAsync(Stream target)
-        {
-            await target.WriteAsync(Payload).ConfigureAwait(false);
-        }
+    private RespNullBulkString()
+    {
     }
 
+    public static RespNullBulkString Instance { get; } = new();
+
+    public override string ToString()
+    {
+        return "<null-blk>";
+    }
+
+    public override async ValueTask WriteToAsync(Stream target)
+    {
+        await target.WriteAsync(Payload).ConfigureAwait(false);
+    }
+}
+
+internal sealed class RespSimpleString : RespObject
+{
+    public required string Value { get; init; }
+
+    public override string ToString()
+    {
+        return Value;
+    }
+
+    public override async ValueTask WriteToAsync(Stream target)
+    {
+        var payload = Encoding.ASCII.GetBytes($"+{Value}\r\n");
+
+        await target.WriteAsync(payload).ConfigureAwait(false);
+    }
+}
+
+internal sealed class RespNull : RespObject
+{
+    private static readonly byte[] Payload = Encoding.ASCII.GetBytes("_\r\n");
+
+    private RespNull()
+    {
+    }
+
+    public static RespNull Instance { get; } = new();
+
+    public override string ToString()
+    {
+        return "<null>";
+    }
+
+    public override async ValueTask WriteToAsync(Stream target)
+    {
+        await target.WriteAsync(Payload).ConfigureAwait(false);
+    }
 }
 
 public class InvalidFormatException : Exception
