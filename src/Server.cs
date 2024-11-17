@@ -264,6 +264,8 @@ public sealed class RedisClientHandler(Stream redisClientStream, int id)
 
     internal sealed class RespBulkString : RespObject
     {
+        private static readonly byte[] EndOfPart = Encoding.ASCII.GetBytes("\r\n");
+
         public required byte[] Value { get; init; }
 
         public override string ToString()
@@ -273,9 +275,11 @@ public sealed class RedisClientHandler(Stream redisClientStream, int id)
 
         public override async ValueTask WriteToAsync(Stream target)
         {
-            var payload = Encoding.ASCII.GetBytes($"${Value.Length}\r\n{Value}\r\n");
+            var preamble = Encoding.ASCII.GetBytes($"${Value.Length}\r\n");
 
-            await target.WriteAsync(payload).ConfigureAwait(false);
+            await target.WriteAsync(preamble).ConfigureAwait(false);
+            await target.WriteAsync(Value).ConfigureAwait(false);
+            await target.WriteAsync(EndOfPart).ConfigureAwait(false);
         }
     }
 
