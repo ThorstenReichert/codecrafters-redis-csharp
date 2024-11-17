@@ -28,6 +28,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
     private static readonly byte[] CmdEcho = Encoding.ASCII.GetBytes("ECHO");
 
     private void LogIncoming(RespObject? message) => Console.WriteLine($"{id,3} >> {message}");
+    private void LogIncoming(string? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogOutgoing(RespObject? message) => Console.WriteLine($"{id,3} << {message}");
     private void LogError(Exception? error) => Console.WriteLine($"{id,3} !! {error}");
     private void LogError(string? error) => Console.WriteLine($"{id,3} !! {error}");
@@ -95,6 +96,7 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
 
             if (token == '+')
             {
+                LogIncoming("Next simple string");
                 reader.AdvanceTo(lineEnd.Value);
 
                 var simpleStringBuffer = buffer.ToArray();
@@ -104,6 +106,8 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             }
             else if (token == '$')
             {
+                LogIncoming("Next bulk string");
+
                 var length = ParseBulkStringLength(ref buffer);
                 reader.AdvanceTo(lineEnd.Value);
 
@@ -111,6 +115,8 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
             }
             else if (token == '*')
             {
+                LogIncoming("Next array");
+
                 var length = ParseArrayLength(buffer);
                 var builder = ImmutableArray.CreateBuilder<RespObject>(length);
 
@@ -133,11 +139,12 @@ internal sealed class RedisClientHandler(TcpClient tcpClient, int id)
         }
     }
 
-    static byte ParseTypeToken(ref readonly ReadOnlySequence<byte> buffer)
+    byte ParseTypeToken(ref readonly ReadOnlySequence<byte> buffer)
     {
         var reader = new SequenceReader<byte>(buffer);
         if (reader.TryPeek(out var typeToken))
         {
+            LogIncoming($"Next type token [Token = {typeToken}]");
             return typeToken;
         }
         else
