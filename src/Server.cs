@@ -51,6 +51,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
 
     private void LogIncoming(RespToken? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogIncoming(RespObject? message) => Console.WriteLine($"{id,3} >> {message}");
+    private void LogIncoming(string? message) => Console.WriteLine($"{id,3} >> {message}");
     private void LogOutgoing(RespObject? message) => Console.WriteLine($"{id,3} << {message}");
     private void LogOutgoing(string? message) => Console.WriteLine($"{id,3} << {message}");
     private void LogError(Exception? error) => Console.WriteLine($"{id,3} !! {error}");
@@ -333,10 +334,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
             {
                 if (await TryReadRespObjectAsync(reader) is RespObject respObject)
                 {
-                    while (await writer.WaitToWriteAsync().ConfigureAwait(false))
-                    {
-                        await WriteRespObjectAsync(writer, respObject).ConfigureAwait(false);
-                    }
+                    await WriteRespObjectAsync(writer, respObject).ConfigureAwait(false);
                 }
                 else
                 {
