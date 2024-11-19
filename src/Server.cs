@@ -1,6 +1,6 @@
+using codecrafters_redis.src;
 using System.Buffers;
 using System.Collections.Concurrent;
-using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
@@ -9,21 +9,27 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
 
-// You can use print statements as follows for debugging, they'll be visible when running tests.
-Console.WriteLine("Logs from your program will appear here!");
-
-// Uncomment this block to pass the first stage
-using TcpListener server = new(IPAddress.Any, 6379);
-server.Start();
-
-var clientCounter = 0;
-var keyValueStore = new ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)>();
-
-while (true)
+internal class Program
 {
-    var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
+    private static async Task Main()
+    {
+        // You can use print statements as follows for debugging, they'll be visible when running tests.
+        Console.WriteLine("Logs from your program will appear here!");
 
-    _ = new RedisClientHolder(handler, keyValueStore, clientCounter++).RunAsync();
+        // Uncomment this block to pass the first stage
+        using TcpListener server = new(IPAddress.Any, 6379);
+        server.Start();
+
+        var clientCounter = 0;
+        var keyValueStore = new ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)>();
+
+        while (true)
+        {
+            var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
+
+            _ = new RedisClientHolder(handler, keyValueStore, clientCounter++).RunAsync();
+        }
+    }
 }
 
 /// <remarks>
@@ -510,225 +516,5 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                 }
             }
         }
-    }
-}
-
-public abstract class RespToken
-{
-    public abstract override string ToString();
-}
-
-public sealed class RespIntegerToken : RespToken
-{
-    public required long Value { get; init; }
-
-    public override string ToString() => $"Token/Integer [Value = {Value}]";
-}
-
-public sealed class RespSimpleStringToken : RespToken
-{
-    public required string Value { get; init; }
-
-    public override string ToString() => $"Token/SimpleString [ Value = {Value}]";
-}
-
-public sealed class RespBulkStringToken : RespToken
-{
-    public required ReadOnlyMemory<byte> Value { get; init; }
-
-    public override string ToString() => $"Token/BulkString [Length = {Value.Length}]";
-}
-
-public sealed class RespNullBulkStringToken : RespToken
-{
-    private RespNullBulkStringToken()
-    {
-
-    }
-
-    public static RespNullBulkStringToken Instance { get; } = new();
-
-    public override string ToString() => "Token/NullBulkString";
-}
-
-public sealed class RespArrayStartToken : RespToken
-{
-    public required int Length { get; init; }
-
-    public override string ToString() => $"Token/ArrayStart [Length = {Length}]";
-}
-
-public sealed class RespNullArrayToken : RespToken
-{
-    private RespNullArrayToken()
-    {
-    }
-
-    public static RespNullArrayToken Instance { get; } = new();
-
-    public override string ToString() => "Token/NullArray";
-}
-
-public abstract class RespObject
-{
-    public abstract override string ToString();
-
-    public abstract ValueTask WriteToAsync(Stream target);
-}
-
-public sealed class RespArrayObject : RespObject
-{
-    public required ImmutableArray<RespObject> Items { get; init; }
-
-    public override string ToString()
-    {
-        return $"[{string.Join(", ", Items)}]";
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        var preamble = Encoding.ASCII.GetBytes($"*{Items.Length}\r\n");
-
-        await target.WriteAsync(preamble).ConfigureAwait(false);
-        foreach (var item in Items)
-        {
-            await item.WriteToAsync(target).ConfigureAwait(false);
-        }
-    }
-}
-
-public sealed class RespNullArrayObject : RespObject
-{
-    private static readonly byte[] Payload = Encoding.ASCII.GetBytes("*-1\r\n");
-
-    private RespNullArrayObject()
-    {
-    }
-
-    public static RespNullArrayObject Instance { get; } = new();
-
-    public override string ToString()
-    {
-        return "<null-array>";
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        await target.WriteAsync(Payload).ConfigureAwait(false);
-    }
-}
-
-public sealed class RespBulkStringObject : RespObject
-{
-    private static readonly byte[] EndOfPart = Encoding.ASCII.GetBytes("\r\n");
-
-    public required ReadOnlyMemory<byte> Value { get; init; }
-
-    public string AsText()
-    {
-        return Encoding.ASCII.GetString(Value.Span);
-    }
-
-    public override string ToString()
-    {
-        return Encoding.ASCII.GetString(Value.Span);
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        var preamble = Encoding.ASCII.GetBytes($"${Value.Length}\r\n");
-
-        await target.WriteAsync(preamble).ConfigureAwait(false);
-        await target.WriteAsync(Value).ConfigureAwait(false);
-        await target.WriteAsync(EndOfPart).ConfigureAwait(false);
-    }
-}
-
-public sealed class RespNullBulkStringObject : RespObject
-{
-    private static readonly byte[] Payload = Encoding.ASCII.GetBytes("$-1\r\n");
-
-    private RespNullBulkStringObject()
-    {
-    }
-
-    public static RespNullBulkStringObject Instance { get; } = new();
-
-    public override string ToString()
-    {
-        return "<null-blk>";
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        await target.WriteAsync(Payload).ConfigureAwait(false);
-    }
-}
-
-public sealed class RespSimpleStringObject : RespObject
-{
-    public required string Value { get; init; }
-
-    public override string ToString()
-    {
-        return Value;
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        var payload = Encoding.ASCII.GetBytes($"+{Value}\r\n");
-
-        await target.WriteAsync(payload).ConfigureAwait(false);
-    }
-}
-
-public sealed class RespIntegerObject : RespObject
-{
-    public required long Value { get; init; }
-
-    public override string ToString()
-    {
-        return Value.ToString();
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        await target.WriteAsync(Encoding.ASCII.GetBytes($":{Value}\r\n")).ConfigureAwait(false);
-    }
-}
-
-public sealed class RespNullObject : RespObject
-{
-    private static readonly byte[] Payload = Encoding.ASCII.GetBytes("_\r\n");
-
-    private RespNullObject()
-    {
-    }
-
-    public static RespNullObject Instance { get; } = new();
-
-    public override string ToString()
-    {
-        return "<null>";
-    }
-
-    public override async ValueTask WriteToAsync(Stream target)
-    {
-        await target.WriteAsync(Payload).ConfigureAwait(false);
-    }
-}
-
-public class InvalidFormatException : Exception
-{
-    public InvalidFormatException()
-    {
-    }
-
-    public InvalidFormatException(string? message) : base(message)
-    {
-    }
-
-    public InvalidFormatException(string? message, Exception? innerException) : base(message, innerException)
-    {
     }
 }
