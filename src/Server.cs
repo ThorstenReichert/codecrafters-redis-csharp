@@ -1,6 +1,5 @@
 using codecrafters_redis.src;
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
@@ -21,13 +20,28 @@ internal class Program
         server.Start();
 
         var clientCounter = 0;
-        var keyValueStore = new ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)>();
-
-        while (true)
+        var redisEngine = new RedisEngine();
+        var commandChannel = Channel.CreateBounded<RedisCommand>(new BoundedChannelOptions(1024)
         {
-            var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true
+        });
 
-            _ = new RedisClientHolder(handler, keyValueStore, clientCounter++).RunAsync();
+        _ = Task.Run(() => redisEngine.RunAsync(commandChannel.Reader));
+
+        try
+        {
+            while (true)
+            {
+                var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
+
+                _ = new RedisClientHolder(handler, commandChannel.Writer, clientCounter++).RunAsync();
+            }
+
+        }
+        finally
+        {
+            commandChannel.Writer.TryComplete();
         }
     }
 }
@@ -36,23 +50,18 @@ internal class Program
 ///     Allows to separate tcp client from actual implementation (which accepts the underlying stream for testing)
 ///     while still cleaning up connections on failures.
 /// </remarks>
-internal sealed class RedisClientHolder(TcpClient redisClient, ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)> keyValueStore, int id)
+internal sealed class RedisClientHolder(TcpClient redisClient, ChannelWriter<RedisCommand> redisEngineWriter, int id)
 {
     public async Task RunAsync()
     {
         using var redisClientStream = redisClient.GetStream();
 
-        await new RedisClientHandler(redisClientStream, keyValueStore, id).RunAsync().ConfigureAwait(false);
+        await new RedisClientHandler(redisClientStream, redisEngineWriter, id).RunAsync().ConfigureAwait(false);
     }
 }
 
-public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDictionary<string, (RespObject Value, DateTime Expiration)> keyValueStore, int id)
+public sealed class RedisClientHandler(Stream redisClientStream, ChannelWriter<RedisCommand> redisEngineWriter, int id)
 {
-    private static readonly ReadOnlyMemory<byte> CmdPing = Encoding.ASCII.GetBytes("PING");
-    private static readonly ReadOnlyMemory<byte> CmdEcho = Encoding.ASCII.GetBytes("ECHO");
-    private static readonly ReadOnlyMemory<byte> CmdSet = Encoding.ASCII.GetBytes("SET");
-    private static readonly ReadOnlyMemory<byte> CmdGet = Encoding.ASCII.GetBytes("GET");
-    private static readonly ReadOnlyMemory<byte> OptPx = Encoding.ASCII.GetBytes("px");
     private static readonly ReadOnlyMemory<byte> RespPartEnd = Encoding.ASCII.GetBytes("\r\n");
 
     private void LogIncoming(RespToken? message) => Console.WriteLine($"{id,3} >> {message}");
@@ -73,14 +82,6 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
             SingleWriter = true
         });
 
-        var objectChannel = Channel.CreateBounded<RespObject>(new BoundedChannelOptions(128)
-        {
-            AllowSynchronousContinuations = true,
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = true,
-        });
-
         var responseChannel = Channel.CreateBounded<RespObject>(new BoundedChannelOptions(128)
         {
             AllowSynchronousContinuations = true,
@@ -95,8 +96,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
             var reader = PipeReader.Create(stream);
 
             _ = Task.Run(() => ReadRespTokensAsync(reader, tokenChannel.Writer));
-            _ = Task.Run(() => ReadRespObjectsAsync(tokenChannel.Reader, objectChannel.Writer));
-            _ = Task.Run(() => HandleRedisCommandsAsync(objectChannel.Reader, responseChannel.Writer));
+            _ = Task.Run(() => ReadRespObjectsAsync(tokenChannel.Reader, redisEngineWriter, responseChannel.Writer));
 
             while (await responseChannel.Reader.WaitToReadAsync().ConfigureAwait(false))
             {
@@ -114,7 +114,6 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
         finally
         {
             tokenChannel.Writer.TryComplete();
-            objectChannel.Writer.TryComplete();
             responseChannel.Writer.TryComplete();
         }
     }
@@ -330,30 +329,32 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
     }
 
     /// <summary>
-    ///     Read tokens from <paramref name="reader"/>, materialize RESP-objects from them, and push the objects into <paramref name="writer"/>.
+    ///     Read tokens from <paramref name="reader"/>, materialize RESP-objects from them, and push the objects into <paramref name="commandWriter"/>.
     /// </summary>
-    private async Task ReadRespObjectsAsync(ChannelReader<RespToken> reader, ChannelWriter<RespObject> writer)
+    private async Task ReadRespObjectsAsync(ChannelReader<RespToken> reader, ChannelWriter<RedisCommand> commandWriter, ChannelWriter<RespObject> responseWriter)
     {
-        async Task WriteRespObjectAsync(ChannelWriter<RespObject> writer, RespObject respObject)
+        async Task WriteCommandAsync(ChannelWriter<RedisCommand> writer, RespObject commandObject)
         {
+            var command = new RedisCommand(id, commandObject, responseWriter);
+
             while (await writer.WaitToWriteAsync().ConfigureAwait(false))
             {
-                if (writer.TryWrite(respObject))
+                if (writer.TryWrite(command))
                 {
                     return;
                 }
             }
 
-            LogError($"Unconsumed RESP object of type {respObject.GetType().Name}");
+            LogError($"Unconsumed RESP object of type {commandObject.GetType().Name}");
         }
 
         try
         {
             while (await reader.WaitToReadAsync().ConfigureAwait(false))
             {
-                if (await TryReadRespObjectAsync(reader) is RespObject respObject)
+                if (await TryReadRespObjectAsync(reader) is RespObject commandObject)
                 {
-                    await WriteRespObjectAsync(writer, respObject).ConfigureAwait(false);
+                    await WriteCommandAsync(commandWriter, commandObject).ConfigureAwait(false);
                 }
                 else
                 {
@@ -364,11 +365,11 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            writer.TryComplete(e);
+            commandWriter.TryComplete(e);
         }
         finally
         {
-            writer.TryComplete();
+            commandWriter.TryComplete();
         }
     }
 
@@ -433,42 +434,67 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
             return null;
         }
     }
+}
+
+public sealed class RedisEngine
+{
+    private readonly Dictionary<string, (RespObject Value, DateTime Expiration)> _keyValueStore = [];
+
+    private static readonly ReadOnlyMemory<byte> CmdPing = Encoding.ASCII.GetBytes("PING");
+    private static readonly ReadOnlyMemory<byte> CmdEcho = Encoding.ASCII.GetBytes("ECHO");
+    private static readonly ReadOnlyMemory<byte> CmdSet = Encoding.ASCII.GetBytes("SET");
+    private static readonly ReadOnlyMemory<byte> CmdGet = Encoding.ASCII.GetBytes("GET");
+    private static readonly ReadOnlyMemory<byte> OptPx = Encoding.ASCII.GetBytes("px");
+
+    private static void LogIncoming(int clientId, RespObject? message) => Console.WriteLine($"{clientId,3} >> {message}");
+    private static void LogOutgoing(int clientId, RespObject? message) => Console.WriteLine($"{clientId,3} << {message}");
+    private static void LogOutgoing(int clientId, string? message) => Console.WriteLine($"{clientId,3} << {message}");
+
+    public async Task RunAsync(ChannelReader<RedisCommand> reader)
+    {
+        await HandleRedisCommandsAsync(reader);
+    }
 
     /// <summary>
     ///     Read commands from <paramref name="reader"/>, execute them, and push the results into <paramref name="writer"/>.
     /// </summary>
-    private async Task HandleRedisCommandsAsync(ChannelReader<RespObject> reader, ChannelWriter<RespObject> writer)
+    private async Task HandleRedisCommandsAsync(ChannelReader<RedisCommand> reader)
     {
-        try
+        while (await reader.WaitToReadAsync().ConfigureAwait(false))
         {
-            while (await reader.WaitToReadAsync().ConfigureAwait(false))
+            while (reader.TryRead(out var command))
             {
-                while (reader.TryRead(out var command))
+                RespObject response;
+                try
                 {
-                    LogIncoming(command);
+                    var clientId = command.ClientId;
+                    LogIncoming(clientId, command.CommandObject);
 
-                    var response = HandleRedisCommand(command);
+                    response = HandleRedisCommand(clientId, command.CommandObject);
 
-                    LogOutgoing(response);
+                    LogOutgoing(clientId, response);
+                }
+                catch (Exception e)
+                {
+                    response = new RespSimpleError { Value = e.Message.Replace('\n', ' ').Replace('\r', ' ') };
+                }
 
-                    await writer.WriteAsync(response).ConfigureAwait(false);
+                var writer = command.ReplyTo;
+                while (await writer.WaitToWriteAsync().ConfigureAwait(false))
+                {
+                    if (writer.TryWrite(response))
+                    {
+                        break;
+                    }
                 }
             }
-        }
-        catch (Exception e) when (e is not OperationCanceledException)
-        {
-            writer.TryComplete(e);
-        }
-        finally
-        {
-            writer.TryComplete();
         }
     }
 
     /// <summary>
     ///     Execute a single command represented by <paramref name="command"/>.
     /// </summary>
-    private RespObject HandleRedisCommand(RespObject command)
+    private RespObject HandleRedisCommand(int clientId, RespObject command)
     {
         if (command is RespArrayObject respArray)
         {
@@ -493,13 +519,13 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
                     var expirationDuration = int.Parse(pxTimeout.Value.Span);
                     var expiration = DateTime.UtcNow + TimeSpan.FromMilliseconds(expirationDuration);
 
-                    LogOutgoing($"Expires [UTC = {expiration:u}]");
+                    LogOutgoing(clientId, $"Expires [UTC = {expiration:u}]");
 
-                    keyValueStore[setName.AsText()] = (setValue, expiration);
+                    _keyValueStore[setName.AsText()] = (setValue, expiration);
                 }
                 else
                 {
-                    keyValueStore[setName.AsText()] = (setValue, DateTime.MaxValue);
+                    _keyValueStore[setName.AsText()] = (setValue, DateTime.MaxValue);
                 }
 
                 return new RespSimpleStringObject { Value = "OK" };
@@ -508,18 +534,18 @@ public sealed class RedisClientHandler(Stream redisClientStream, ConcurrentDicti
             else if (respArray.Items is [RespBulkStringObject getCmd, RespBulkStringObject getName]
                 && getCmd.Value.Span.SequenceEqual(CmdGet.Span))
             {
-                if (keyValueStore.TryGetValue(getName.AsText(), out var foundResponse))
+                if (_keyValueStore.TryGetValue(getName.AsText(), out var foundResponse))
                 {
                     var referenceTimestamp = DateTime.UtcNow;
                     if (foundResponse.Expiration < referenceTimestamp)
                     {
-                        LogOutgoing($"Expired [UTC = {foundResponse.Expiration:u}, Now = {referenceTimestamp:u}]");
+                        LogOutgoing(clientId, $"Expired [UTC = {foundResponse.Expiration:u}, Now = {referenceTimestamp:u}]");
 
                         return RespNullBulkStringObject.Instance;
                     }
                     else
                     {
-                        LogOutgoing($"Not Expired [UTC = {foundResponse.Expiration}, Now = {referenceTimestamp:u}]");
+                        LogOutgoing(clientId, $"Not Expired [UTC = {foundResponse.Expiration}, Now = {referenceTimestamp:u}]");
 
                         return foundResponse.Value;
                     }

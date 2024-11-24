@@ -151,4 +151,19 @@ namespace codecrafters_redis.src
             await target.WriteAsync(Payload).ConfigureAwait(false);
         }
     }
+
+    public sealed class RespSimpleError : RespObject
+    {
+        public required string Value { get; init; }
+
+        public override string ToString()
+        {
+            return Value;
+        }
+
+        public override async ValueTask WriteToAsync(Stream target)
+        {
+            await target.WriteAsync(Encoding.ASCII.GetBytes($"-{Value}\r\n"));
+        }
+    }
 }
