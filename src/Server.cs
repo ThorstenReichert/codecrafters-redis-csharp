@@ -21,13 +21,8 @@ internal class Program
 
         var clientCounter = 0;
         var redisEngine = new RedisEngine();
-        var commandChannel = Channel.CreateBounded<RedisCommand>(new BoundedChannelOptions(1024)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true
-        });
 
-        _ = Task.Run(() => redisEngine.RunAsync(commandChannel.Reader));
+        _ = Task.Run(redisEngine.RunAsync);
 
         try
         {
@@ -35,13 +30,13 @@ internal class Program
             {
                 var handler = await server.AcceptTcpClientAsync().ConfigureAwait(false);
 
-                _ = new RedisClientHolder(handler, commandChannel.Writer, clientCounter++).RunAsync();
+                _ = new RedisClientHolder(handler, redisEngine, clientCounter++).RunAsync();
             }
 
         }
         finally
         {
-            commandChannel.Writer.TryComplete();
+            redisEngine.Dispose();
         }
     }
 }
@@ -50,17 +45,17 @@ internal class Program
 ///     Allows to separate tcp client from actual implementation (which accepts the underlying stream for testing)
 ///     while still cleaning up connections on failures.
 /// </remarks>
-internal sealed class RedisClientHolder(TcpClient redisClient, ChannelWriter<RedisCommand> redisEngineWriter, int id)
+internal sealed class RedisClientHolder(TcpClient redisClient, RedisEngine redisEngine, int id)
 {
     public async Task RunAsync()
     {
         using var redisClientStream = redisClient.GetStream();
 
-        await new RedisClientHandler(redisClientStream, redisEngineWriter, id).RunAsync().ConfigureAwait(false);
+        await new RedisClientHandler(redisClientStream, redisEngine, id).RunAsync().ConfigureAwait(false);
     }
 }
 
-public sealed class RedisClientHandler(Stream redisClientStream, ChannelWriter<RedisCommand> redisEngineWriter, int id)
+public sealed class RedisClientHandler(Stream redisClientStream, RedisEngine redisEngine, int id)
 {
     private static readonly ReadOnlyMemory<byte> RespPartEnd = Encoding.ASCII.GetBytes("\r\n");
 
@@ -96,7 +91,7 @@ public sealed class RedisClientHandler(Stream redisClientStream, ChannelWriter<R
             var reader = PipeReader.Create(stream);
 
             _ = Task.Run(() => ReadRespTokensAsync(reader, tokenChannel.Writer));
-            _ = Task.Run(() => ReadRespObjectsAsync(tokenChannel.Reader, redisEngineWriter, responseChannel.Writer));
+            _ = Task.Run(() => ReadRespObjectsAsync(tokenChannel.Reader, redisEngine, responseChannel.Writer));
 
             while (await responseChannel.Reader.WaitToReadAsync().ConfigureAwait(false))
             {
@@ -331,30 +326,16 @@ public sealed class RedisClientHandler(Stream redisClientStream, ChannelWriter<R
     /// <summary>
     ///     Read tokens from <paramref name="reader"/>, materialize RESP-objects from them, and push the objects into <paramref name="commandWriter"/>.
     /// </summary>
-    private async Task ReadRespObjectsAsync(ChannelReader<RespToken> reader, ChannelWriter<RedisCommand> commandWriter, ChannelWriter<RespObject> responseWriter)
+    private async Task ReadRespObjectsAsync(ChannelReader<RespToken> reader, RedisEngine engine, ChannelWriter<RespObject> responseWriter)
     {
-        async Task WriteCommandAsync(ChannelWriter<RedisCommand> writer, RespObject commandObject)
-        {
-            var command = new RedisCommand(id, commandObject, responseWriter);
-
-            while (await writer.WaitToWriteAsync().ConfigureAwait(false))
-            {
-                if (writer.TryWrite(command))
-                {
-                    return;
-                }
-            }
-
-            LogError($"Unconsumed RESP object of type {commandObject.GetType().Name}");
-        }
-
         try
         {
             while (await reader.WaitToReadAsync().ConfigureAwait(false))
             {
                 if (await TryReadRespObjectAsync(reader) is RespObject commandObject)
                 {
-                    await WriteCommandAsync(commandWriter, commandObject).ConfigureAwait(false);
+                    var command = new RedisCommand(id, commandObject, responseWriter);
+                    await engine.ScheduleCommandAsync(command).ConfigureAwait(false);
                 }
                 else
                 {
@@ -365,11 +346,11 @@ public sealed class RedisClientHandler(Stream redisClientStream, ChannelWriter<R
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            commandWriter.TryComplete(e);
+            responseWriter.TryComplete(e);
         }
         finally
         {
-            commandWriter.TryComplete();
+            responseWriter.TryComplete();
         }
     }
 
@@ -436,9 +417,14 @@ public sealed class RedisClientHandler(Stream redisClientStream, ChannelWriter<R
     }
 }
 
-public sealed class RedisEngine
+public sealed class RedisEngine : IDisposable
 {
     private readonly Dictionary<string, (RespObject Value, DateTime Expiration)> _keyValueStore = [];
+    private readonly Channel<RedisCommand> _commandChannel = Channel.CreateBounded<RedisCommand>(new BoundedChannelOptions(1024)
+    {
+        FullMode = BoundedChannelFullMode.Wait,
+        SingleReader = true
+    });
 
     private static readonly ReadOnlyMemory<byte> CmdPing = Encoding.ASCII.GetBytes("PING");
     private static readonly ReadOnlyMemory<byte> CmdEcho = Encoding.ASCII.GetBytes("ECHO");
@@ -450,9 +436,29 @@ public sealed class RedisEngine
     private static void LogOutgoing(int clientId, RespObject? message) => Console.WriteLine($"{clientId,3} << {message}");
     private static void LogOutgoing(int clientId, string? message) => Console.WriteLine($"{clientId,3} << {message}");
 
-    public async Task RunAsync(ChannelReader<RedisCommand> reader)
+    public void Dispose()
     {
-        await HandleRedisCommandsAsync(reader);
+        _commandChannel.Writer.TryComplete();
+    }
+
+    public async ValueTask ScheduleCommandAsync(RedisCommand command)
+    {
+        var writer = _commandChannel.Writer;
+
+        while (await writer.WaitToWriteAsync().ConfigureAwait(false))
+        {
+            if (writer.TryWrite(command))
+            {
+                return;
+            }
+        }
+
+        LogOutgoing(command.ClientId, "Unable to respond to command.");
+    }
+
+    public async Task RunAsync()
+    {
+        await HandleRedisCommandsAsync(_commandChannel.Reader);
     }
 
     /// <summary>
